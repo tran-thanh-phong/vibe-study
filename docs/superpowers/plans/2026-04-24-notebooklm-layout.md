@@ -20,17 +20,22 @@
 - `ui/source_library.py` &mdash; left-pane rendering + Add Source form
 - `ui/workspace.py` &mdash; right-pane rendering (scope selector + tabs)
 - `tests/test_library.py`
-- `tests/test_vector_store.py`
 - `tests/test_chat_scope.py`
 
 **Modified files:**
-- `vector_store.py` &mdash; rewritten for persistent, incremental index (`load_or_create_index`, `insert_documents`, `delete_source`)
+- `vector_store.py` &mdash; rewritten for persistent, incremental index (`load_or_create_index`, `insert_documents`, `delete_source`) &mdash; removes the old `build_index`
+- `tests/test_vector_store.py` &mdash; existing file contents replaced; old `TestBuildIndex` class is obsolete
+- `tests/test_chat.py` &mdash; existing integration tests updated to use the new API (was importing the removed `build_index`)
 - `chat.py` &mdash; `create_chat_engine(index, scope)` adds metadata filter when scope is a category
 - `ingestion.py` &mdash; unchanged loaders; all tagging happens in `library.py` so existing tests stay green
 - `outline.py` &mdash; no change (already takes a `list[Document]`)
 - `exercises.py` &mdash; no change (already takes a `list[Document]`)
 - `app.py` &mdash; rewritten to the two-column layout; initialises registry + index on startup
 - `.gitignore` &mdash; already includes `.superpowers/`; add `storage/` in Task 1
+
+**Existing test infrastructure (already in place &mdash; do NOT redefine):**
+- `tests/conftest.py` provides an autouse fixture that sets `Settings.llm = MockLLM()` and `Settings.embed_model = MockEmbedding(embed_dim=1536)` for every test. New tests must NOT override these; rely on conftest.
+- `tests/conftest.py::sample_documents` fixture exists but is not used by the new tests (they build their own `Document` instances with the new `source_id` / `category` metadata).
 
 **Directory on disk at runtime:**
 ```
@@ -415,28 +420,22 @@ git commit -m "feat: per-source docstore pickles (save/load/delete)"
 ## Task 5: Rewrite `vector_store.py` for persistent + incremental index
 
 **Files:**
-- Modify: `vector_store.py`
-- Create: `tests/test_vector_store.py`
+- Modify: `vector_store.py` (replace contents; removes `build_index`)
+- Modify: `tests/test_vector_store.py` (replace contents; old `TestBuildIndex` is obsolete)
+- Modify: `tests/test_chat.py` (the two integration tests import the removed `build_index` and must be updated)
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Replace `tests/test_vector_store.py` with the new test suite**
 
-Create `tests/test_vector_store.py`:
+Replace the entire contents of `tests/test_vector_store.py`:
 
 ```python
 import pytest
-from unittest.mock import patch, MagicMock
-from llama_index.core import Document, Settings
-from llama_index.core.embeddings.mock_embed_model import MockEmbedding
-
-
-@pytest.fixture(autouse=True)
-def mock_embeddings():
-    Settings.embed_model = MockEmbedding(embed_dim=8)
-    yield
+from llama_index.core import Document
 
 
 @pytest.fixture
 def chroma_dir(tmp_path, monkeypatch):
+    """Point the vector store at an isolated chroma dir per test."""
     monkeypatch.setattr("vector_store._CHROMA_PATH", str(tmp_path / "chroma"))
     return tmp_path / "chroma"
 
@@ -478,6 +477,8 @@ class TestVectorStore:
         assert index2 is not None
 ```
 
+Note: no `Settings.embed_model` setup &mdash; `tests/conftest.py` already autouse-sets `MockEmbedding(embed_dim=1536)`.
+
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `pytest tests/test_vector_store.py -v`
@@ -485,11 +486,11 @@ Expected: FAIL &mdash; functions don't exist yet.
 
 - [ ] **Step 3: Rewrite `vector_store.py`**
 
-Replace entire contents of `vector_store.py`:
+Replace entire contents of `vector_store.py` (removes the old `build_index`):
 
 ```python
 import chromadb
-from llama_index.core import VectorStoreIndex, StorageContext, Document
+from llama_index.core import VectorStoreIndex, Document
 from llama_index.vector_stores.chroma import ChromaVectorStore
 
 _CHROMA_PATH = "./chroma_db"
@@ -509,12 +510,8 @@ def _collection_size() -> int:
 
 
 def load_or_create_index() -> VectorStoreIndex:
-    """Load existing collection as an index, or create an empty one."""
-    collection = _collection()
-    vector_store = ChromaVectorStore(chroma_collection=collection)
-    storage_context = StorageContext.from_defaults(vector_store=vector_store)
-    if collection.count() == 0:
-        return VectorStoreIndex.from_documents([], storage_context=storage_context)
+    """Return an index wrapping the Chroma collection (empty or populated)."""
+    vector_store = ChromaVectorStore(chroma_collection=_collection())
     return VectorStoreIndex.from_vector_store(vector_store=vector_store)
 
 
@@ -534,20 +531,71 @@ def delete_source(index: VectorStoreIndex, source_id: str) -> None:
     _collection().delete(where={"source_id": source_id})
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+Note: `VectorStoreIndex.from_vector_store` handles both empty and populated collections without branching.
+
+- [ ] **Step 4: Run vector_store tests**
 
 Run: `pytest tests/test_vector_store.py -v`
-Expected: all 4 pass.
+Expected: 4 passed.
 
-- [ ] **Step 5: Confirm existing ingestion tests still pass**
+- [ ] **Step 5: Update `tests/test_chat.py`**
 
-Run: `pytest tests/test_ingestion.py -v`
-Expected: all pass (no changes to ingestion.py).
+The existing `tests/test_chat.py` imports the now-removed `build_index`. Replace its contents with an equivalent integration test that uses the new API:
 
-- [ ] **Step 6: Commit**
+```python
+import pytest
+from llama_index.core import Document
+from llama_index.core.chat_engine.types import BaseChatEngine
+
+
+@pytest.fixture
+def chroma_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr("vector_store._CHROMA_PATH", str(tmp_path / "chroma"))
+    return tmp_path / "chroma"
+
+
+def _tagged_sample_docs():
+    return [
+        Document(text="Python is a high-level programming language.",
+                 metadata={"source": "pdf", "page": 1,
+                           "source_id": "s-py", "category": "Day 1"}),
+        Document(text="Machine learning uses statistical methods.",
+                 metadata={"source": "youtube", "url": "https://youtube.com/watch?v=abc123",
+                           "source_id": "s-ml", "category": "Day 2"}),
+    ]
+
+
+class TestCreateChatEngine:
+    def test_returns_chat_engine(self, chroma_dir):
+        from vector_store import load_or_create_index, insert_documents
+        from chat import create_chat_engine
+        index = load_or_create_index()
+        insert_documents(index, _tagged_sample_docs())
+        engine = create_chat_engine(index)
+        assert isinstance(engine, BaseChatEngine)
+
+
+class TestChat:
+    def test_returns_string_response(self, chroma_dir):
+        from vector_store import load_or_create_index, insert_documents
+        from chat import create_chat_engine, chat
+        index = load_or_create_index()
+        insert_documents(index, _tagged_sample_docs())
+        engine = create_chat_engine(index)
+        response = chat(engine, "What is Python?")
+        assert isinstance(response, str)
+        assert len(response) > 0
+```
+
+- [ ] **Step 6: Full test suite still green**
+
+Run: `pytest -v`
+Expected: every test in `tests/` passes (ingestion, outline, exercises, vector_store, chat).
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add vector_store.py tests/test_vector_store.py
+git add vector_store.py tests/test_vector_store.py tests/test_chat.py
 git commit -m "feat: persistent incremental vector store (load/insert/delete)"
 ```
 

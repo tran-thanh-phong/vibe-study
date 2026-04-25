@@ -75,16 +75,40 @@ class TestLoadYoutube:
 
     def test_returns_single_document_with_full_transcript(self):
         from ingestion import load_youtube
-        fake_transcript = [
-            {"text": "Hello world", "start": 0.0, "duration": 1.0},
-            {"text": "This is a test", "start": 1.0, "duration": 1.0},
-        ]
-        with patch("ingestion.YouTubeTranscriptApi.get_transcript", return_value=fake_transcript):
+        snippet1 = MagicMock(); snippet1.text = "Hello world"
+        snippet2 = MagicMock(); snippet2.text = "This is a test"
+        mock_transcript = MagicMock()
+        mock_transcript.language_code = "en"
+        mock_transcript.fetch.return_value = [snippet1, snippet2]
+        mock_list = MagicMock()
+        mock_list.find_transcript.return_value = mock_transcript
+        mock_api = MagicMock()
+        mock_api.list.return_value = mock_list
+        with patch("ingestion.YouTubeTranscriptApi", return_value=mock_api):
             docs = load_youtube("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
         assert len(docs) == 1
         assert "Hello world" in docs[0].text
         assert "This is a test" in docs[0].text
         assert docs[0].metadata["source"] == "youtube"
+        assert docs[0].metadata["lang"] == "en"
+
+    def test_falls_back_to_first_available_when_english_missing(self):
+        from ingestion import load_youtube
+        from youtube_transcript_api._errors import NoTranscriptFound
+
+        vi_snippet = MagicMock(); vi_snippet.text = "Xin chào"
+        vi_transcript = MagicMock()
+        vi_transcript.language_code = "vi"
+        vi_transcript.fetch.return_value = [vi_snippet]
+        mock_list = MagicMock()
+        mock_list.find_transcript.side_effect = NoTranscriptFound("vid", ["en"], mock_list)
+        mock_list.__iter__.return_value = iter([vi_transcript])
+        mock_api = MagicMock()
+        mock_api.list.return_value = mock_list
+        with patch("ingestion.YouTubeTranscriptApi", return_value=mock_api):
+            docs = load_youtube("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        assert docs[0].text == "Xin chào"
+        assert docs[0].metadata["lang"] == "vi"
 
 
 class TestLoadGithub:

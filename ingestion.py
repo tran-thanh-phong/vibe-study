@@ -25,9 +25,15 @@ def _parse_video_id(url: str) -> str:
 
 def load_youtube(url: str) -> list[Document]:
     video_id = _parse_video_id(url)
-    transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
-    text = " ".join(entry["text"] for entry in transcript_list)
-    return [Document(text=text, metadata={"source": "youtube", "url": url})]
+    api = YouTubeTranscriptApi()
+    transcripts = api.list(video_id)
+    try:
+        transcript = transcripts.find_transcript(["en"])
+    except Exception:
+        transcript = next(iter(transcripts))
+    fetched = transcript.fetch()
+    text = " ".join(snippet.text for snippet in fetched)
+    return [Document(text=text, metadata={"source": "youtube", "url": url, "lang": transcript.language_code})]
 
 
 def _parse_github_owner_repo(url: str) -> tuple[str, str]:

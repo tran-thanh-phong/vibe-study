@@ -13,3 +13,5 @@ storage/
 htmlcov/
 .coverage
 .superpowers/
+.playwright-mcp/
+task*-*.png
